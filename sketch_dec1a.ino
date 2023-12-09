@@ -32,10 +32,11 @@ bool closingServo = false;
 const int encoderMainPinA = 34;   // Interrupt pin for encoder channel A
 const int encoderMainPinB = 35;   // Interrupt pin for encoder channel B
 const int motorMainPin = 23;      // PWM pin for controlling the motor
-const int motorMainPin2 = 13;
+const int motorMainPin2 = 21;
 
 volatile long encoderMainCount = 0; // Current encoder count
-long targetPosition = -600;      // Desired target position
+volatile int lastEncodedMain = 0;
+long targetPosition = -800;      // Desired target position
 float Kp = 15;                 // Proportional gain
 float Ki = 1.25;                // Integral gain
 float Kd = 0.75;                // Derivative gain
@@ -46,9 +47,7 @@ float integral = 0;            // Integral of the error
 
 const int ledcChannel = 1;     // LEDC channel for PWM
 const int ledcChannel2 = 2;
-// const int resolution = 8;      // PWM resolution, adjust as needed
-// const int frequency = 1000;    // PWM frequency in Hz
-const int pwmMax = 150;        // Maximum PWM value
+const int pwmMax = 255;        // Maximum PWM value
 
 int enc_to_dist;
 
@@ -69,7 +68,7 @@ void IRAM_ATTR ISR(){
 
 void IRAM_ATTR ISR2(){
   int A_2 = digitalRead(encoderPinAHort);
-  int B_2 = digitalRead(encoderPinAHort);
+  int B_2 = digitalRead(encoderPinBHort);
   if((A_2 == HIGH) != (B_2==LOW)){
     encoderCountHort--;
   }
@@ -88,6 +87,22 @@ void IRAM_ATTR ISRMain() {
   } else {
     encoderMainCount++;
   }
+}
+
+void debounceEncoderMain() {
+  int MSB = digitalRead(encoderMainPinA);
+  int LSB = digitalRead(encoderMainPinB);
+
+  int encoded = (MSB << 1) | LSB;
+  int sum = (lastEncodedMain << 2) | encoded;
+
+  if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
+    encoderMainCount++;
+  } else if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
+    encoderMainCount--;
+  }
+
+  lastEncodedMain = encoded;
 }
 
 
@@ -109,12 +124,12 @@ void setup() {
   pinMode(encoderMainPinA, INPUT_PULLUP);
   pinMode(encoderMainPinB, INPUT_PULLUP);
 
-  ledcSetup(ledcChannel, 1000, 8);
-  ledcSetup(ledcChannel2, 1000, 8);
+  ledcSetup(ledcChannel, 5000, 8);
+  ledcSetup(ledcChannel2, 5000, 8);
   ledcAttachPin(motorMainPin, ledcChannel);
   ledcAttachPin(motorMainPin2, ledcChannel2);
 
-  attachInterrupt(digitalPinToInterrupt(encoderMainPinA), ISRMain, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderMainPinA), ISRMain, CHANGE);
 
   enc_to_dist = 0;
 
@@ -154,17 +169,18 @@ void motorHortStop() {
 }
 
  void loop() {
+    debounceEncoderMain();
     unsigned long currentTime = millis();
     unsigned long dt = currentTime - prevTime;
 
-    enc_to_dist = ((encoderMainCount / 1000.0) * 45.9);
+    enc_to_dist = ((encoderMainCount / 2000.0) * 45.9);
 
     // Calculate the error
     long error = targetPosition - enc_to_dist;
 
     // Calculate the integral term with anti-windup
     integral += error * dt;
-    integral = constrain(integral, -150, 150);
+    integral = constrain(integral, -255, 255);
 
     // Calculate the derivative term
     long dError = (error - prevError) / dt;
@@ -180,7 +196,7 @@ void motorHortStop() {
 
       
       case 1:
-        if (encoderCount > 1000) {
+        if (encoderCount > 2000) {
           motorStop(); // Stop the motor
           currentState++;
         } else {
@@ -191,7 +207,7 @@ void motorHortStop() {
         break;
       
       case 2:
-        if(encoderCountHort < -1600){
+        if(encoderCountHort > 1500){
           motorHortStop();
           currentState++;
         } else {
@@ -220,13 +236,13 @@ void motorHortStop() {
         break;
 
       case 5:
-        if (enc_to_dist > -600) {
-          pwmValue = map(constrain(-output, -150, 150), -150, 150, 0, pwmMax);
-          ledcWrite(ledcChannel, pwmValue);
+        if (enc_to_dist > targetPosition) {
+          pwmValue = map(constrain((-1 * output), 255, (-1*255)), 255, (-1*255), 0, 255);
+          ledcWrite(ledcChannel, 2*pwmValue);
         } else {
           delay(500); // Delay before stopping
           currentState++; // Move to the next state for stopping
-          targetPosition = 0; // Set target for returning to zero
+          targetPosition = -100; // Set target for returning to zero
         }
         break;
       
@@ -245,7 +261,7 @@ void motorHortStop() {
 
       case 8:
 
-        if (encoderCount > 1000) {
+        if (encoderCount > 2000) {
           motorStop(); // Stop the motor
           currentState++;
         } else {
@@ -255,7 +271,7 @@ void motorHortStop() {
         break;
       
       case 9:
-        if(encoderCountHort < -3050){
+        if(encoderCountHort > 3000){
           motorHortStop();
           currentState++;
         } else {
@@ -278,28 +294,40 @@ void motorHortStop() {
 
       case 11:
       //  closingServo = false;
-        servoOpen();
+        myservo.write(180);
         delay(500);
+        myservo.detach();
         currentState++;
         break;
 
-
       case 12:
-          if (enc_to_dist < 0) {
-          pwmValue = map(constrain(output, -150, 150), -150, 150, 0, pwmMax);
+          if (enc_to_dist < targetPosition) {
+          pwmValue = map(constrain(output, -100, 100), -100, 100, 0, 100);
           ledcWrite(ledcChannel2, pwmValue);
         } else {
           delay(500); // Delay before stopping
-          currentState++; // Move to the next state for stopping after reaching zero
+          currentState++; // Move to the next state for ,stopping after reaching zero
         }
+
+        break;
       
       case 13:
         ledcWrite(ledcChannel2, 0);
         delay(500); // Delay before changing direction
         currentState ++; // Restart the sequence by moving forward
-        targetPosition = -600; // Set target for the forward movement
+        targetPosition = -800; // Set target for the forward movement
         break;
+
       // Other cases...
+      case 14:
+       if(encoderCountHort < 0){
+          motorHortStop();
+          currentState++;
+        } else {
+          digitalWrite(motorPin3, LOW);
+          digitalWrite(motorPin4, HIGH);
+        }
+        break;
 
       default:
         break;
@@ -312,7 +340,7 @@ void motorHortStop() {
   // }
 
 
-  Serial.println(encoderCountHort);
+  Serial.println(encoderMainCount);
 }
 
 
@@ -338,10 +366,4 @@ void servoLock(){
   myservo.write(0);
 }
 
-void motorGoUp(){
-}
-
-void motorGoCenter(){
-
-}
 
